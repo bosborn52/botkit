@@ -64,23 +64,42 @@ This bot demonstrates many of the core features of Botkit:
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~*/
 
 
-if (!process.env.token) {
-    console.log('Error: Specify token in environment');
-    process.exit(1);
+if (!process.env.clientId || !process.env.clientSecret || !process.env.PORT) {
+  console.log('Error: Specify clientId clientSecret and PORT in environment');
+  process.exit(1);
 }
 
 var Botkit = require('./lib/Botkit.js');
 var os = require('os');
 
 var controller = Botkit.slackbot({
+    clientId: process.env.clientId,
+    clientSecret: process.env.clientSecret,
     debug: true,
+    scopes: ['bot','admin,identify','commands','incoming-webhook','im:history','emoji:read','im:read','reactions:read','reminders:read','users.profile:read','chat:write:user','chat:write:bot','files:write:user','im:write,reactions:write','reminders:write','pins:write'],
+    studio_token: process.env.studio_token,
+    studio_command_uri: process.env.studio_command_uri,
+    json_file_store: __dirname + '/.db/' // store user data in a simple JSON format
 });
 
-var bot = controller.spawn({
-    token: process.env.token
-}).startRTM();
+controller.startTicking();
 
-controller.hears(['hello', 'hi'], 'direct_message,direct_mention,mention', function(bot, message) {
+// Set up an Express-powered webserver to expose oauth and webhook endpoints
+var webserver = require(__dirname + '/components/express_webserver.js')(controller);
+// Set up a simple storage backend for keeping a record of customers
+// who sign up for the app via the oauth
+require(__dirname + '/components/user_registration.js')(controller);
+
+// Send an onboarding message when a new team joins
+require(__dirname + '/components/onboarding.js')(controller);
+
+var normalizedPath = require("path").join(__dirname, "skills");
+require("fs").readdirSync(normalizedPath).forEach(function(file) {
+  require("./skills/" + file)(controller);
+});
+
+
+controller.hears(['hello', 'hi'], 'ambient,direct_message,direct_mention,mention', function(bot, message) {
 
     bot.api.reactions.add({
         timestamp: message.ts,
@@ -243,3 +262,42 @@ function formatUptime(uptime) {
     uptime = uptime + ' ' + unit;
     return uptime;
 }
+controller.hears(['dm me'],['direct_message','direct_mention'],function(bot,message) {
+  bot.startConversation(message,function(err,convo) {
+    convo.say('Heard ya');
+  });
+
+  bot.startPrivateConversation(message,function(err,dm) {
+    dm.say('Private reply!');
+  });
+
+});
+
+var _bots = {};
+function trackBot(bot) {
+  _bots[bot.config.token] = bot;
+}
+controller.on('create_bot',function(bot,config) {
+
+  if (_bots[bot.config.token]) {
+    // already online! do nothing.
+  } else {
+    bot.startRTM(function(err) {
+
+      if (!err) {
+        trackBot(bot);
+      }
+
+      bot.startPrivateConversation({user: config.createdBy},function(err,convo) {
+        if (err) {
+          console.log(err);
+        } else {
+          convo.say('I am a bot that has just joined your team');
+          convo.say('You must now /invite me to a channel so that I can be of use!');
+        }
+      });
+
+    });
+  }
+
+});
